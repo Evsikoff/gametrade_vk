@@ -28,11 +28,9 @@ class GameTraderGame {
         // Storage key
         this.STORAGE_KEY = 'game_trader_save_v1';
 
-        // Yandex SDK
-        this.ysdk = null;
-        this.player = null;
-        this.canReadCloudSaves = false;
-        this.canWriteCloudSaves = false;
+        // VK Bridge
+        this.vkBridgeReady = false;
+        this.isOdnoklassniki = false;
 
         // Loading state
         this.loadingOverlay = null;
@@ -139,8 +137,8 @@ class GameTraderGame {
     }
 
     async initializeGame() {
-        this.showLoadingScreen('Подключение к игровой сети');
-        await this.initYandexSDK();
+        this.showLoadingScreen('Подключение к VK');
+        await this.initVKBridge();
 
         this.updateLoadingStatus('Загрузка игр');
         const progressLoaded = await this.loadProgress();
@@ -194,14 +192,6 @@ class GameTraderGame {
     signalLoadingReady() {
         if (this.loadingReadyReported) return;
         this.loadingReadyReported = true;
-
-        try {
-            if (this.ysdk?.features?.LoadingAPI?.ready) {
-                this.ysdk.features.LoadingAPI.ready();
-            }
-        } catch (e) {
-            console.warn('Не удалось сообщить о готовности загрузки', e);
-        }
     }
 
     startInitialGameplaySession() {
@@ -210,106 +200,45 @@ class GameTraderGame {
         this.startGameplaySession();
     }
 
-    startGameplaySession() {
-        try {
-            this.ysdk?.features?.GameplayAPI?.start?.();
-        } catch (e) {
-            console.warn('Не удалось запустить игровую сессию', e);
-        }
-    }
+    startGameplaySession() { }
 
-    stopGameplaySession() {
-        try {
-            this.ysdk?.features?.GameplayAPI?.stop?.();
-        } catch (e) {
-            console.warn('Не удалось остановить игровую сессию', e);
-        }
-    }
+    stopGameplaySession() { }
 
-    async initYandexSDK() {
-        if (typeof YaGames === 'undefined') {
-            console.warn('Yandex SDK не найден. Запускаем в оффлайн-режиме (Mock).');
-            this.createMockSDK();
+    async initVKBridge() {
+        // Detect platform from URL params
+        const urlParams = new URLSearchParams(window.location.search);
+        this.isOdnoklassniki = urlParams.get('vk_client') === 'ok';
+
+        if (typeof vkBridge === 'undefined') {
+            console.warn('VK Bridge не найден. Работаем в оффлайн-режиме.');
             return;
         }
 
         try {
-            this.ysdk = await YaGames.init();
-
-            if (this.ysdk?.environment?.i18n) {
-                const langSetter = this.ysdk.environment.i18n.lang;
-                if (typeof langSetter === 'function') {
-                    langSetter('ru');
-                } else {
-                    this.ysdk.environment.i18n.lang = 'ru';
-                }
+            const data = await vkBridge.send('VKWebAppInit');
+            if (data.result) {
+                this.vkBridgeReady = true;
             }
-
-            await this.setupPlayer();
         } catch (e) {
-            console.warn('Не удалось инициализировать Yandex SDK, переходим в оффлайн-режим', e);
-            this.createMockSDK();
+            console.warn('Ошибка инициализации VK Bridge', e);
         }
-    }
 
-    createMockSDK() {
-        this.ysdk = {
-            features: {
-                LoadingAPI: {
-                    ready: () => console.log('[MOCK] LoadingAPI.ready() called')
-                },
-                GameplayAPI: {
-                    start: () => console.log('[MOCK] GameplayAPI.start() called'),
-                    stop: () => console.log('[MOCK] GameplayAPI.stop() called')
-                }
-            },
-            adv: {
-                showFullscreenAdv: async ({ callbacks }) => {
-                    console.log('[MOCK] showFullscreenAdv called');
-                    if (callbacks.onOpen) callbacks.onOpen();
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    if (callbacks.onClose) callbacks.onClose(true);
-                }
-            },
-            getPlayer: async () => this.player
-        };
-
-        // Mock player with local storage fallback
-        this.player = {
-            getData: async () => {
-                console.log('[MOCK] player.getData called');
-                const raw = localStorage.getItem(this.STORAGE_KEY);
-                return raw ? JSON.parse(raw) : {};
-            },
-            setData: async (data) => {
-                console.log('[MOCK] player.setData called', data);
-                localStorage.setItem(this.STORAGE_KEY, JSON.stringify(data));
+        // Subscribe to screen config updates
+        vkBridge.subscribe((e) => {
+            if (e.detail.type === 'VKWebAppUpdateConfig') {
+                console.log('VK config updated:', e.detail.data);
             }
-        };
+        });
 
-        this.canReadCloudSaves = true;
-        this.canWriteCloudSaves = true;
-    }
-
-    async setupPlayer() {
-        if (!this.ysdk?.getPlayer) return;
-
+        // Request fullscreen on mobile VK clients
         try {
-            this.player = await this.ysdk.getPlayer({ scopes: true });
-        } catch (primaryError) {
-            console.warn('Полный доступ к игроку недоступен, пробуем ограниченный режим', primaryError);
-            try {
-                this.player = await this.ysdk.getPlayer({ scopes: false });
-            } catch (secondaryError) {
-                console.warn('Не удалось получить данные игрока', secondaryError);
-                // Fallback to mock player if YSDK exists but getPlayer fails
-                this.createMockSDK();
-                return;
-            }
+            await vkBridge.send('VKWebAppSetViewSettings', {
+                status_bar_style: 'dark',
+                fullscreen: true
+            });
+        } catch (e) {
+            // Not supported on all platforms (e.g. desktop), ignore
         }
-
-        this.canReadCloudSaves = !!(this.player && typeof this.player.getData === 'function');
-        this.canWriteCloudSaves = !!(this.player && typeof this.player.setData === 'function');
     }
 
     prepareNewRun() {
@@ -753,38 +682,16 @@ class GameTraderGame {
     }
 
     async showFullscreenAd() {
-        if (!this.ysdk?.adv?.showFullscreenAdv) {
+        if (typeof vkBridge === 'undefined' || !this.vkBridgeReady) {
             return;
         }
 
-        this.stopGameplaySession();
-
-        await new Promise(resolve => {
-            try {
-                this.ysdk.adv.showFullscreenAdv({
-                    callbacks: {
-                        onOpen: function () { },
-                        onClose: (wasShown) => {
-                            this.startGameplaySession();
-                            resolve(wasShown);
-                        },
-                        onError: (error) => {
-                            console.warn('Ошибка показа рекламы:', error);
-                            this.startGameplaySession();
-                            resolve(error);
-                        },
-                    }
-                }).catch(error => {
-                    console.warn('Не удалось показать рекламу:', error);
-                    this.startGameplaySession();
-                    resolve(error);
-                });
-            } catch (e) {
-                console.warn('Не удалось инициировать показ рекламы:', e);
-                this.startGameplaySession();
-                resolve(e);
-            }
-        });
+        try {
+            await vkBridge.send('VKWebAppShowNativeAds', { ad_format: 'interstitial' });
+        } catch (error) {
+            console.log('Реклама не показана:', error);
+            // Always continue gameplay even if ad fails
+        }
     }
 
     // ==========================================
@@ -941,21 +848,32 @@ class GameTraderGame {
     }
 
     async saveToCloud(data) {
-        if (!this.canWriteCloudSaves || !this.player) return;
+        if (typeof vkBridge === 'undefined' || !this.vkBridgeReady) return;
         try {
-            await this.player.setData({ [this.STORAGE_KEY]: data }, true);
+            await vkBridge.send('VKWebAppStorageSet', {
+                key: this.STORAGE_KEY,
+                value: JSON.stringify(data)
+            });
         } catch (e) {
-            console.warn('Cloud save failed', e);
+            console.warn('VK Storage save failed', e);
         }
     }
 
     async loadFromCloud() {
-        if (!this.canReadCloudSaves || !this.player) return null;
+        if (typeof vkBridge === 'undefined' || !this.vkBridgeReady) return null;
         try {
-            const data = await this.player.getData([this.STORAGE_KEY]);
-            return data[this.STORAGE_KEY] || null;
+            const response = await vkBridge.send('VKWebAppStorageGet', {
+                keys: [this.STORAGE_KEY]
+            });
+            if (response.keys) {
+                const entry = response.keys.find(k => k.key === this.STORAGE_KEY);
+                if (entry && entry.value) {
+                    return JSON.parse(entry.value);
+                }
+            }
+            return null;
         } catch (e) {
-            console.warn('Cloud load failed', e);
+            console.warn('VK Storage load failed', e);
             return null;
         }
     }
@@ -983,8 +901,11 @@ class GameTraderGame {
 
     clearProgress() {
         localStorage.removeItem(this.STORAGE_KEY);
-        if (this.canWriteCloudSaves && this.player) {
-            this.player.setData({ [this.STORAGE_KEY]: {} }, true).catch(() => { });
+        if (typeof vkBridge !== 'undefined' && this.vkBridgeReady) {
+            vkBridge.send('VKWebAppStorageSet', {
+                key: this.STORAGE_KEY,
+                value: ''
+            }).catch(() => { });
         }
     }
 }
